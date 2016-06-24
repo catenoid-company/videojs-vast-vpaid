@@ -5,6 +5,29 @@ var utilities = require('./utilityFunctions');
 
 var playerUtils = {};
 
+// function .bind를 지원하지 않는 하위 웹브라우져를 위한 호환성 유지 코드
+if(!Function.prototype.bindTo) {
+	Function.prototype.bindTo = function(THIS) {
+		if(typeof this !== 'function') {
+			// closest thing possible to the ECMAScript 5
+			// internal IsCallable function
+			throw new TypeError('Function.prototype.bind - what is trying to be bound is not callable');
+		}
+
+		var args = Array.prototype.slice.call(arguments, 1),
+			f_to_bind = this,
+			f_nop = function() {},
+			f_bound = function() {
+				return f_to_bind.apply(this instanceof f_nop && THIS ? this : THIS, args.concat(Array.prototype.slice.call(arguments)));
+			};
+
+		f_nop.prototype = this.prototype;
+		f_bound.prototype = new f_nop();
+
+		return f_bound;
+	};
+}
+
 /**
  * Returns an object that captures the portions of player state relevant to
  * video playback. The result of this function can be passed to
@@ -194,11 +217,14 @@ playerUtils.isReadyToResume = function (player) {
  *
  * @param player
  */
-playerUtils.prepareForAds = function (player) {
-  var blackPoster = player.addChild('blackPoster');
+playerUtils.prepareForAds = function (player, hasPrerollAd) {
+  var blackPoster = null;
   var _firstPlay = true;
   var volumeSnapshot;
 
+  if(hasPrerollAd) {
+	  blackPoster = player.addChild('blackPoster');
+  }
 
   monkeyPatchPlayerApi();
 
@@ -308,7 +334,8 @@ playerUtils.prepareForAds = function (player) {
   }
 
   function resetFirstPlay() {
-    _firstPlay = true;
+	  // midroll 재생시 preroll이 함께 나오는 문제로 인해 이 부분을 주석처리함.
+    //_firstPlay = true;
     blackPoster.show();
     restoreContentVolume();
   }
@@ -339,8 +366,18 @@ playerUtils.prepareForAds = function (player) {
     }
   }
 
+	function showBlackPoster() {
+		if(blackPoster === null) {
+			blackPoster = player.addChild('blackPoster');
+		} else {
+			if(dom.hasClass(blackPoster.el(), 'vjs-hidden')) {
+				blackPoster.show();
+			}
+		}
+	}
+
   function hideBlackPoster() {
-    if (!dom.hasClass(blackPoster.el(), 'vjs-hidden')) {
+    if (blackPoster !== null && !dom.hasClass(blackPoster.el(), 'vjs-hidden')) {
       blackPoster.hide();
     }
   }
@@ -352,6 +389,15 @@ playerUtils.prepareForAds = function (player) {
   function removeStyles() {
     dom.removeClass(player.el(), 'vjs-ad-playing');
   }
+
+	return {
+		showBlackPoster: function() {
+			showBlackPoster();
+		},
+		hideBlackPoster: function() {
+			hideBlackPoster();
+		}
+	};
 };
 
 /**

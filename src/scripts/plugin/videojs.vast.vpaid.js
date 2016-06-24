@@ -15,340 +15,414 @@ var utilities = require('../utils/utilityFunctions');
 var logger = require ('../utils/consoleLogger');
 
 module.exports = function VASTPlugin(options) {
-  var snapshot;
-  var player = this;
-  var vast = new VASTClient();
-  var adsCanceled = false;
-  var defaultOpts = {
-    // maximum amount of time in ms to wait to receive `adsready` from the ad
-    // implementation after play has been requested. Ad implementations are
-    // expected to load any dynamic libraries and make any requests to determine
-    // ad policies for a video during this time.
-    timeout: 500,
+	var player = this,
+		blackPoster = playerUtils.prepareForAds(player, options.filter(function(el) {
+			return el.rollPosition === 'preroll';
+		}).length > 0); // prepareForAds는 한번만 실행하도록 하며, preroll이 존재하는 경우엔 함수 실행시 blackPoster를 생성한다.
 
-    //TODO:finish this IOS FIX
-    //Whenever you play an add on IOS, the native player kicks in and we loose control of it. On very heavy pages the 'play' event
-    // May occur after the video content has already started. This is wrong if you want to play a preroll ad that needs to happen before the user
-    // starts watching the content. To prevent this usec
-    iosPrerollCancelTimeout: 2000,
+	// options로 들어온 재생이 필요한 광고 배열을
+	// 순회하면서 모두 PlayVASTAd 인스턴스를 생성한다.
+	options.forEach(function(option) {
+		PlayVASTAd.create(utilities.extend({}, option, {
+			player: player,
+			blackPoster: blackPoster
+		}));
+	});
+};
 
-    // maximun amount of time for the ad to actually start playing. If this timeout gets
-    // triggered the ads will be cancelled
-    adCancelTimeout: 3000,
+var PlayVASTAd = function(options) {
+		this.snapshot;
+		this.player = options.player; // VASTPlugin function에서 직접 player object를 주입한다.
+		this.vast = new VASTClient();
+		this.adsCanceled = false;
+		this.settings = utilities.extend({}, {
+			timeout: 1000, // 각종 스크립트들이 로딩되는데 걸리는 최대 timeout 시간. 기본 500ms였으나 종종 문제가 생기므로 1000으로 늘림.
+			iosPrerollCancelTimeout: 2000,
+			adCancelTimeout: 1000,
+			playAdAlways: false,
+			adsEnabled: true,
+			autoResize: true,
+			vpaidFlashLoaderPath: '/VPAIDFlash.swf',
+			verbosity: 0,
 
-    // Boolean flag that configures the player to play a new ad before the user sees the video again
-    // the current video
-    playAdAlways: false,
+			player: null,
+			blackPoster: null
+		}, options || {});
+	};
 
-    // Flag to enable or disable the ads by default.
-    adsEnabled: true,
+PlayVASTAd.create = function(option) {
+	return (new PlayVASTAd(option)).initialize();
+};
 
-    // Boolean flag to enable or disable the resize with window.resize or orientationchange
-    autoResize: true,
+PlayVASTAd.prototype.cancelAds = function() {
+	this.player.trigger('vast.adsCancel');
+	this.adsCanceled = true;
+};
 
-    // Path to the VPAID flash ad's loader
-    vpaidFlashLoaderPath: '/VPAIDFlash.swf',
+PlayVASTAd.prototype.trackAdError = function(error, vastResponse) {
+	this.player.trigger({type: 'vast.adError', error: error});
+	this.cancelAds();
+	logger.error('AD ERROR:', error.message, error, vastResponse);
+};
 
-    // verbosity of console logging:
-    // 0 - error
-    // 1 - error, warn
-    // 2 - error, warn, info
-    // 3 - error, warn, info, log
-    // 4 - error, warn, info, log, debug
-    verbosity: 0
-  };
+PlayVASTAd.prototype.initialize = function() {
+	var self = this,
+		settings = this.settings;
 
-  var settings = utilities.extend({}, defaultOpts, options || {});
+	if(typeof settings.adTagUrl === 'undefined' && typeof settings.url !== 'undefined') {
+		settings.adTagUrl = settings.url;
+	}
 
-  if(utilities.isUndefined(settings.adTagUrl) && utilities.isDefined(settings.url)){
-    settings.adTagUrl = settings.url;
-  }
+	if(typeof settings.adTagUrl === 'string') {
+		settings.adTagUrl = (function(adTagUrl) {
+			return function() {
+				return adTagUrl;
+			};
+		})(settings.adTagUrl);
+	}
 
-  if (utilities.isString(settings.adTagUrl)) {
-    settings.adTagUrl = utilities.echoFn(settings.adTagUrl);
-  }
+	if(typeof settings.adTagXML !== 'undefined' && typeof settings.adTagXML !== 'function') {
+		return this.trackAdError(new VASTError('on VideoJS VAST plugin, the passed adTagXML option does not contain a function'));
+	}
 
-  if (utilities.isDefined(settings.adTagXML) && !utilities.isFunction(settings.adTagXML)) {
-    return trackAdError(new VASTError('on VideoJS VAST plugin, the passed adTagXML option does not contain a function'));
-  }
+	if(typeof settings.adTagUrl === 'undefined' && typeof settings.adTagXML !== 'function') {
+		return this.trackAdError(new VASTError('on VideoJS VAST plugin, missing adTagUrl on options object'));
+	}
 
-  if (!utilities.isDefined(settings.adTagUrl) && !utilities.isFunction(settings.adTagXML)) {
-    return trackAdError(new VASTError('on VideoJS VAST plugin, missing adTagUrl on options object'));
-  }
+	logger.setVerbosity(settings.verbosity);
+	vastUtil.runFlashSupportCheck(settings.vpaidFlashLoaderPath); // Necessary step for VPAIDFLASHClient to work.
 
-  logger.setVerbosity (settings.verbosity);
+	if(settings.playAdAlways) {
+		// No matter what happens we play a new ad before the user sees the video again.
+		this.player.on('vast.contentEnd', function () {
+			setTimeout(function () {
+				self.player.trigger('vast.reset');
+			}, 0);
+		});
+	}
 
-  vastUtil.runFlashSupportCheck(settings.vpaidFlashLoaderPath);// Necessary step for VPAIDFLASHClient to work.
+	this.player.on('vast.reset', function() {
+		//If we are reseting the plugin, we don't want to restore the content
+		self.snapshot = null;
+		self.cancelAds();
+	});
 
-  playerUtils.prepareForAds(player);
+	// player의 promotionController로부터 전달받은
+	// 광고의 time offset에 해당하는 custom event에 광고재생 callback
+	// 을 이벤트 리스너로 걸어준다.
+	// 다만 광고는 한 번 재생되면 다시 재생되어선 안되기 때문에
+	// 일회성 listener를 건다.
+	if(typeof settings.offset === 'undefined' || settings.offset < 0) {
+		return this.trackAdError(new VASTError('invalid ad offset.'));
+	}
 
-  if (settings.playAdAlways) {
-    // No matter what happens we play a new ad before the user sees the video again.
-    player.on('vast.contentEnd', function () {
-      setTimeout(function () {
-        player.trigger('vast.reset');
-      }, 0);
-    });
-  }
+	if(settings.rollPosition === 'preroll') {
+		this.player.on('vast.firstPlay', this.tryToPlayPrerollAd.bindTo(this));
+	} else if(settings.rollPosition === 'midroll') {
+		this.player.one('vast.timeUpdate:' + settings.offset, this.tryToPlayMidrollAd.bindTo(this));
+	} else if(settings.rollPosition === 'postroll') {
+		this.player.one('vast.timeEnd', this.tryToPlayPostrollAd.bindTo(this));
+	}
 
-  player.on('vast.firstPlay', tryToPlayPrerollAd);
+	this.player.vast = {
+		isEnabled: function () {
+			return settings.adsEnabled;
+		},
+		enable: function () {
+			settings.adsEnabled = true;
+		},
+		disable: function () {
+			settings.adsEnabled = false;
+		}
+	};
 
-  player.on('vast.reset', function () {
-    //If we are reseting the plugin, we don't want to restore the content
-    snapshot = null;
-    cancelAds();
-  });
+	return true;
+};
 
-  player.vast = {
-    isEnabled: function () {
-      return settings.adsEnabled;
-    },
+PlayVASTAd.prototype.removeAdUnit = function() {
+	if(this.player.vast && this.player.vast.adUnit) {
+		this.player.vast.adUnit = null; //We remove the adUnit
+	}
+};
 
-    enable: function () {
-      settings.adsEnabled = true;
-    },
+PlayVASTAd.prototype.restoreVideoContent = function() {
+	this.setupContentEvents();
+	if(this.snapshot) {
+		playerUtils.restorePlayerSnapshot(this.player, this.snapshot);
+		this.snapshot = null;
+	}
+};
 
-    disable: function () {
-      settings.adsEnabled = false;
-    }
-  };
+PlayVASTAd.prototype.restoreVideoContentAsContentEnded = function() {
+	if(this.snapshot) {
+		playerUtils.restorePlayerSnapshot(this.player, this.snapshot);
+		this.snapshot = null;
+	}
+};
 
-  return player.vast;
+PlayVASTAd.prototype.setupContentEvents = function() {
+	var self = this;
 
-  /**** Local functions ****/
-  function tryToPlayPrerollAd() {
-    //We remove the poster to prevent flickering whenever the content starts playing
-    playerUtils.removeNativePoster(player);
+	playerUtils.once(this.player, ['playing', 'vast.reset', 'vast.firstPlay'], function (evt) {
+		if(evt.type !== 'playing') {
+			return;
+		}
 
-    playerUtils.once(player, ['vast.adsCancel', 'vast.adEnd'], function () {
-      removeAdUnit();
-      restoreVideoContent();
-    });
+		self.player.trigger('vast.contentStart');
 
-    async.waterfall([
-      checkAdsEnabled,
-      preparePlayerForAd,
-      startAdCancelTimeout,
-      playPrerollAd
-    ], function (error, response) {
-      if (error) {
-        trackAdError(error, response);
-      } else {
-        player.trigger('vast.adEnd');
-      }
-    });
+		playerUtils.once(self.player, ['ended', 'vast.reset', 'vast.firstPlay'], function (evt) {
+			if(evt.type === 'ended') {
+				self.player.trigger('vast.contentEnd');
+			}
+		});
+	});
+};
 
-    /*** Local functions ***/
+PlayVASTAd.prototype.checkAdsEnabled = function(next) {
+	if(this.settings.adsEnabled) {
+	  return next(null);
+	}
 
-    function removeAdUnit() {
-      if (player.vast && player.vast.adUnit) {
-        player.vast.adUnit = null; //We remove the adUnit
-      }
-    }
+	next(new VASTError('Ads are not enabled'));
+};
 
-    function restoreVideoContent() {
-      setupContentEvents();
-      if (snapshot) {
-        playerUtils.restorePlayerSnapshot(player, snapshot);
-        snapshot = null;
-      }
-    }
+PlayVASTAd.prototype.preparePlayerForAd = function(next) {
+	var self = this;
 
-    function setupContentEvents() {
-      playerUtils.once(player, ['playing', 'vast.reset', 'vast.firstPlay'], function (evt) {
-        if (evt.type !== 'playing') {
-          return;
-        }
+	if(this.canPlayPrerollAd()) {
+		this.snapshot = playerUtils.getPlayerSnapshot(this.player);
+		this.player.pause();
+		this.addSpinnerIcon();
 
-        player.trigger('vast.contentStart');
+		if(this.player.paused()) {
+			next(null);
+		} else {
+			playerUtils.once(this.player, ['playing'], function() {
+				self.player.pause();
+				next(null);
+			});
+		}
+	} else {
+		next(new VASTError('video content has been playing before preroll ad'));
+	}
+};
 
-        playerUtils.once(player, ['ended', 'vast.reset', 'vast.firstPlay'], function (evt) {
-          if (evt.type === 'ended') {
-            player.trigger('vast.contentEnd');
-          }
-        });
-      });
-    }
+PlayVASTAd.prototype.startAdCancelTimeout = function(next) {
+	var self = this,
+		adCancelTimeoutId;
 
-    function checkAdsEnabled(next) {
-      if (settings.adsEnabled) {
-        return next(null);
-      }
-      next(new VASTError('Ads are not enabled'));
-    }
+	this.adsCanceled = false;
 
-    function preparePlayerForAd(next) {
-      if (canPlayPrerollAd()) {
-        snapshot = playerUtils.getPlayerSnapshot(player);
-        player.pause();
-        addSpinnerIcon();
+	adCancelTimeoutId = setTimeout(function () {
+		self.trackAdError(new VASTError('timeout while waiting for the video to start playing', 402));
+	}, this.settings.adCancelTimeout);
 
-        if(player.paused()) {
-          next(null);
-        } else {
-          playerUtils.once(player, ['playing'], function() {
-            player.pause();
-            next(null);
-          });
-        }
-      } else {
-        next(new VASTError('video content has been playing before preroll ad'));
-      }
-    }
+	playerUtils.once(this.player, ['vast.adStart', 'vast.adsCancel'], function clearAdCancelTimeout() {
+		if(adCancelTimeoutId) {
+			clearTimeout(adCancelTimeoutId);
+			adCancelTimeoutId = null;
+		}
+	});
 
-    function canPlayPrerollAd() {
-      return !utilities.isIPhone() || player.currentTime() <= settings.iosPrerollCancelTimeout;
-    }
+	next(null);
+};
 
-    function startAdCancelTimeout(next) {
-      var adCancelTimeoutId;
-      adsCanceled = false;
+PlayVASTAd.prototype.playPrerollAd = function(callback) {
+	var self = this;
 
-      adCancelTimeoutId = setTimeout(function () {
-        trackAdError(new VASTError('timeout while waiting for the video to start playing', 402));
-      }, settings.adCancelTimeout);
+	async.waterfall([
+		function(callback) {
+			self.getVastResponse(callback);
+		},
+		function(vastResponse, callback) {
+			self.playAd(vastResponse, callback);
+		}
+	], callback);
+};
 
-      playerUtils.once(player, ['vast.adStart', 'vast.adsCancel'], clearAdCancelTimeout);
+PlayVASTAd.prototype.getVastResponse = function(callback) {
+	this.vast.getVASTResponse(this.settings.adTagUrl ? this.settings.adTagUrl() : this.settings.adTagXML, callback);
+};
 
-      /*** local functions ***/
-      function clearAdCancelTimeout() {
-        if (adCancelTimeoutId) {
-          clearTimeout(adCancelTimeoutId);
-          adCancelTimeoutId = null;
-        }
-      }
+PlayVASTAd.prototype.playAd = function(vastResponse, callback) {
+	var self = this;
 
-      next(null);
-    }
+	//TODO: Find a better way to stop the play. The 'playPrerollWaterfall' ends in an inconsistent situation
+	//If the state is not 'preroll?' it means the ads were canceled therefore, we break the waterfall
+	if(this.adsCanceled) {
+		return;
+	}
 
-    function addSpinnerIcon() {
-      dom.addClass(player.el(), 'vjs-vast-ad-loading');
-      playerUtils.once(player, ['vast.adStart', 'vast.adsCancel'], removeSpinnerIcon);
-    }
+	var adIntegrator = this.isVPAID(vastResponse) ? new VPAIDIntegrator(this.player, this.settings) : new VASTIntegrator(this.player);
+	var adFinished = false;
 
-    function removeSpinnerIcon() {
-      //IMPORTANT NOTE: We remove the spinnerIcon asynchronously to give time to the browser to start the video.
-      // If we remove it synchronously we see a flash of the content video before the ad starts playing.
-      setTimeout(function () {
-        dom.removeClass(player.el(), 'vjs-vast-ad-loading');
-      }, 100);
-    }
+	playerUtils.once(this.player, ['vast.adStart'], addAdsLabel);
+	playerUtils.once(this.player, ['vast.adEnd'], removeAdsLabel);
 
-  }
+	if(utilities.isIDevice()) {
+		preventManualProgress();
+	}
 
-  function cancelAds() {
-    player.trigger('vast.adsCancel');
-    adsCanceled = true;
-  }
+	this.player.vast.vastResponse = vastResponse;
+	logger.debug ("calling adIntegrator.playAd() with vastResponse:", vastResponse);
+	this.player.vast.adUnit = adIntegrator.playAd(vastResponse, callback);
 
-  function playPrerollAd(callback) {
-    async.waterfall([
-      getVastResponse,
-      playAd
-    ], callback);
-  }
+	function addAdsLabel() {
+		if(adFinished || self.player.controlBar.getChild('AdsLabel')) {
+			return;
+		}
 
-  function getVastResponse(callback) {
-    vast.getVASTResponse(settings.adTagUrl ? settings.adTagUrl() : settings.adTagXML, callback);
-  }
+		self.player.controlBar.addChild('AdsLabel');
+	}
 
-  function playAd(vastResponse, callback) {
-    //TODO: Find a better way to stop the play. The 'playPrerollWaterfall' ends in an inconsistent situation
-    //If the state is not 'preroll?' it means the ads were canceled therefore, we break the waterfall
-    if (adsCanceled) {
-      return;
-    }
+	function removeAdsLabel() {
+		self.player.controlBar.removeChild('AdsLabel');
+		adFinished = true;
+	}
 
-    var adIntegrator = isVPAID(vastResponse) ? new VPAIDIntegrator(player, settings) : new VASTIntegrator(player);
-    var adFinished = false;
+	function preventManualProgress() {
+		//IOS video clock is very unreliable and we need a 3 seconds threshold to ensure that the user forwarded/rewound the ad
+		var PROGRESS_THRESHOLD = 3;
+		var previousTime = 0;
+		var skipad_attempts = 0;
 
-    playerUtils.once(player, ['vast.adStart', 'vast.adsCancel'], function (evt) {
-      if (evt.type === 'vast.adStart') {
-        addAdsLabel();
-      }
-    });
+		self.player.on('timeupdate', preventAdSeek);
+		self.player.on('ended', preventAdSkip);
+		playerUtils.once(self.player, ['vast.adEnd', 'vast.adsCancel', 'vast.adError'], stopPreventManualProgress);
 
-    playerUtils.once(player, ['vast.adEnd', 'vast.adsCancel'], removeAdsLabel);
+		function preventAdSkip() {
+			// Ignore ended event if the Ad time was not 'near' the end
+			// and revert time to the previous 'valid' time
+			if((self.player.duration() - previousTime) > PROGRESS_THRESHOLD) {
+				self.player.pause(true); // this reduce the video jitter if the IOS skip button is pressed
+				self.player.play(true); // we need to trigger the play to put the video element back in a valid state
+				self.player.currentTime(previousTime);
+			}
+		}
 
-    if (utilities.isIDevice()) {
-      preventManualProgress();
-    }
+		function preventAdSeek() {
+			var currentTime = self.player.currentTime();
+			var progressDelta = Math.abs(currentTime - previousTime);
 
-    player.vast.vastResponse = vastResponse;
-    logger.debug ("calling adIntegrator.playAd() with vastResponse:", vastResponse);
-    player.vast.adUnit = adIntegrator.playAd(vastResponse, callback);
+			if(progressDelta > PROGRESS_THRESHOLD) {
+				skipad_attempts += 1;
 
-    /*** Local functions ****/
-    function addAdsLabel() {
-      if (adFinished || player.controlBar.getChild('AdsLabel')) {
-        return;
-      }
+				if(skipad_attempts >= 2) {
+					self.player.pause(true);
+				}
 
-      player.controlBar.addChild('AdsLabel');
-    }
+				self.player.currentTime(previousTime);
+			} else {
+				previousTime = currentTime;
+			}
+		}
 
-    function removeAdsLabel() {
-      player.controlBar.removeChild('AdsLabel');
-      adFinished = true;
-    }
+		function stopPreventManualProgress() {
+			self.player.off('timeupdate', preventAdSeek);
+			self.player.off('ended', preventAdSkip);
+		}
+	}
+};
 
-    function preventManualProgress() {
-      //IOS video clock is very unreliable and we need a 3 seconds threshold to ensure that the user forwarded/rewound the ad
-      var PROGRESS_THRESHOLD = 3;
-      var previousTime = 0;
-      var skipad_attempts = 0;
+PlayVASTAd.prototype.isVPAID = function(vastResponse) {
+	var i, len;
+	var mediaFiles = vastResponse.mediaFiles;
 
-      player.on('timeupdate', preventAdSeek);
-      player.on('ended', preventAdSkip);
+	for(i = 0, len = mediaFiles.length; i < len; i++) {
+		if(vastUtil.isVPAID(mediaFiles[i])) {
+			return true;
+		}
+	}
 
-      playerUtils.once(player, ['vast.adEnd', 'vast.adsCancel', 'vast.adError'], stopPreventManualProgress);
+	return false;
+};
 
-      /*** Local functions ***/
-      function preventAdSkip() {
-        // Ignore ended event if the Ad time was not 'near' the end
-        // and revert time to the previous 'valid' time
-        if ((player.duration() - previousTime) > PROGRESS_THRESHOLD) {
-          player.pause(true); // this reduce the video jitter if the IOS skip button is pressed
-          player.play(true); // we need to trigger the play to put the video element back in a valid state
-          player.currentTime(previousTime);
-        }
-      }
+PlayVASTAd.prototype.canPlayPrerollAd = function() {
+	return !utilities.isIPhone() || this.player.currentTime() <= this.settings.iosPrerollCancelTimeout;
+};
 
-      function preventAdSeek() {
-        var currentTime = player.currentTime();
-        var progressDelta = Math.abs(currentTime - previousTime);
-        if (progressDelta > PROGRESS_THRESHOLD) {
-          skipad_attempts += 1;
-          if (skipad_attempts >= 2) {
-            player.pause(true);
-          }
-          player.currentTime(previousTime);
-        } else {
-          previousTime = currentTime;
-        }
-      }
+PlayVASTAd.prototype.addSpinnerIcon = function() {
+	dom.addClass(this.player.el(), 'vjs-vast-ad-loading');
+	playerUtils.once(this.player, ['vast.adStart', 'vast.adsCancel', 'vast.adError'], this.removeSpinnerIcon.bindTo(this));
+};
 
-      function stopPreventManualProgress() {
-        player.off('timeupdate', preventAdSeek);
-        player.off('ended', preventAdSkip);
-      }
-    }
-  }
+PlayVASTAd.prototype.removeSpinnerIcon = function() {
+	var self = this;
 
-  function trackAdError(error, vastResponse) {
-    player.trigger({type: 'vast.adError', error: error});
-    cancelAds();
-    logger.error ('AD ERROR:', error.message, error, vastResponse);
-  }
+	//IMPORTANT NOTE: We remove the spinnerIcon asynchronously to give time to the browser to start the video.
+	// If we remove it synchronously we see a flash of the content video before the ad starts playing.
+	setTimeout(function () {
+		dom.removeClass(self.player.el(), 'vjs-vast-ad-loading');
+	}, 100);
+};
 
-  function isVPAID(vastResponse) {
-    var i, len;
-    var mediaFiles = vastResponse.mediaFiles;
-    for (i = 0, len = mediaFiles.length; i < len; i++) {
-      if (vastUtil.isVPAID(mediaFiles[i])) {
-        return true;
-      }
-    }
-    return false;
-  }
+PlayVASTAd.prototype.tryToPlayAd = function() {
+	var self = this;
+
+	//We remove the poster to prevent flickering whenever the content starts playing
+	playerUtils.removeNativePoster(this.player);
+
+	// 영상 재생을 위한 sequencial한 callback list
+	async.waterfall([
+		this.checkAdsEnabled.bindTo(this),
+		this.preparePlayerForAd.bindTo(this),
+		this.startAdCancelTimeout.bindTo(this),
+		this.playPrerollAd.bindTo(this)
+	], function (error, response) {
+		if(error) {
+			self.trackAdError(error, response);
+		} else {
+			self.player.trigger('vast.adEnd');
+		}
+	});
+};
+
+PlayVASTAd.prototype.tryToPlayPrerollAd = function() {
+	var self = this;
+
+	// preroll 광고의 경우는 광고 시작전의 검은화면이
+	// 이미 광고 셋업단계에서 수행되었으므로 추가로 수행하지 않는다.
+	playerUtils.once(this.player, ['vast.adsCancel', 'vast.adEnd'], function() {
+		self.removeAdUnit();
+		self.restoreVideoContent();
+	});
+
+	// 본 광고 시작
+	this.tryToPlayAd();
+};
+
+PlayVASTAd.prototype.tryToPlayMidrollAd = function() {
+	var self = this;
+
+	// 광고 시작 전의 검은 화면 표시
+	// 광고가 끝나면 playerUtils쪽에서 자동으로 hide시킴
+	// preroll의 경우는 initialize 이전에 이미 검은 화면을 표시함.
+	this.settings.blackPoster.showBlackPoster();
+
+	playerUtils.once(this.player, ['vast.adsCancel', 'vast.adEnd'], function() {
+		self.removeAdUnit();
+		self.restoreVideoContent();
+	});
+
+	// 본 광고 시작
+	this.tryToPlayAd();
+};
+
+PlayVASTAd.prototype.tryToPlayPostrollAd = function() {
+	var self = this;
+
+	// 광고 시작 전의 검은 화면 표시
+	// 광고가 끝나면 playerUtils쪽에서 자동으로 hide시킴
+	// preroll의 경우는 initialize 이전에 이미 검은 화면을 표시함.
+	this.settings.blackPoster.showBlackPoster();
+
+	// postroll의 경우는 video content restore 함수를 호출하지 않는다.
+	// 해당 함수 호출시 동영상의 첫부분이 다시 재생되는 문제가 있음.
+	playerUtils.once(this.player, ['vast.adsCancel', 'vast.adEnd'], function() {
+		self.removeAdUnit();
+		self.restoreVideoContentAsContentEnded();
+	});
+
+	// 본 광고 시작
+	this.tryToPlayAd();
 };
