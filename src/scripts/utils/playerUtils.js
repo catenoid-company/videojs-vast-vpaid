@@ -408,10 +408,7 @@ playerUtils.prepareForAds = function (player, hasPrerollAd) {
  * @param {object} player The videojs player object
  */
 playerUtils.removeNativePoster = function (player) {
-  var tech = player.el().querySelector('.vjs-tech');
-  if (tech) {
-    tech.removeAttribute('poster');
-  }
+	player.el().querySelector('.vjs-poster').style.backgroundImage = '';
 };
 
 /**
