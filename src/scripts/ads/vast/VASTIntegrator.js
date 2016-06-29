@@ -302,11 +302,34 @@ VASTIntegrator.prototype._addClickThrough = function addClickThrough(mediaFile, 
   }
 };
 
+// videojs의 flash failback에 첫 재생시 seeked 이벤트가 발생하지 않는 문제가 있음.
+// (https://github.com/videojs/video-js-swf/issues/115) 버그는 아니라고 생각되지만,
+// vast plugin과는 충분히 문제가 될만큼 영향을 주고 있으므로 첫 재생시에 강제로 seeked 이벤트를
+// 한번만 발생시켜야함.
+var triggerSeekedEventOnce = (function() {
+		var func = [function(player) {
+				if(player.tech_.options_.techId.indexOf('Flash') >= 0) {
+					player.tech_.trigger('seeked');
+				}
+			}];
+
+		return function(player) {
+			var trigger = func.shift();
+
+			if(trigger) {
+				trigger(player);
+			}
+		};
+	})();
+
 VASTIntegrator.prototype._playSelectedAd = function playSelectedAd(source, response, callback) {
   var player = this.player;
 
   player.preload("auto"); //without preload=auto the durationchange event is never fired
   player.src(source);
+
+	// 아래 함수는 계속 실행되더라도 첫번째만 실행된다.
+	triggerSeekedEventOnce(player);
 
   logger.debug ("<VASTIntegrator._playSelectedAd> waiting for durationchange to play the ad...");
 
