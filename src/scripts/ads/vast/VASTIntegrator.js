@@ -381,6 +381,12 @@ VASTIntegrator.prototype._playSelectedAd = function playSelectedAd(source, respo
     logger.debug ("<VASTIntegrator._playSelectedAd/playAd> calling player.play()...");
 
     player.play();
+
+	// player 기본 preload 셋팅이 'auto'에서 'none'으로 변경되어서
+	// midroll광고 재생시 adStart 이벤트가 두번 발생하는 문제가 있음.
+	// 따라서 광고 시작전에 preload가 'auto'로 변경되었던 것을
+	// 광고 시작 직후 다시 원래 설정대로 'none'으로 변경함.
+	player.preload('none');
   }
 };
 
