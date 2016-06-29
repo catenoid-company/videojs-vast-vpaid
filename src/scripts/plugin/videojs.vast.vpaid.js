@@ -54,8 +54,19 @@ module.exports = function VASTPlugin(options) {
 
 				// 재생시간이 duration보다 같거나 크면 재생이 종료된 것으로 간주
 				// 이 이벤트는 즉시 발생시킨다.
-				if(time >= duration) {
-					player.trigger('vast.timeEnd');
+				if(time > 0 && duration > 0 && time >= duration) {
+					setTimeout(function() {
+						player.trigger('vast.timeEnd');
+
+						// postroll이 종료될때 다시 원래 컨텐츠가 복구되고
+						// 동영상이 끝나게 되는데 이때 다시 0초로 seek한 뒤에
+						// play, pause를 이어서 수행한다. (pause만 수행할 경우 재생버튼이 보이지 않음)
+						player.one('vast.adEnd', function() {
+							player.one('ended', function() {
+								player.currentTime(0).play().pause();
+							});
+						});
+					}, 500);
 				}
 
 				if(external_time !== internal_time) {
