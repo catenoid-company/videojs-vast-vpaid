@@ -63,7 +63,7 @@ module.exports = function VASTPlugin(options) {
 						// play, pause를 이어서 수행한다. (pause만 수행할 경우 재생버튼이 보이지 않음)
 						player.one('vast.adEnd', function() {
 							player.one('ended', function() {
-								player.play().pause();
+								player.pause();
 							});
 						});
 					}, 500);

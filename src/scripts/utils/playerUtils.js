@@ -108,7 +108,7 @@ playerUtils.restorePlayerSnapshot = function restorePlayerSnapshot(player, snaps
     player.src({src: snapshot.src, type: snapshot.type});
 
     // safari requires a call to `load` to pick up a changed source
-    player.load();
+    player.load().play();
 
   } else {
     restoreTracks();
