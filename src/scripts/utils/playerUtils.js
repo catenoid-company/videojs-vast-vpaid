@@ -100,6 +100,7 @@ playerUtils.restorePlayerSnapshot = function restorePlayerSnapshot(player, snaps
 
     // on ios7, fiddling with textTracks too early will cause safari to crash
     player.one('contentloadedmetadata', restoreTracks);
+    player.one('loadedmetadata', restoreTracks);
 
     player.one('canplay', tryToResume);
     ensureCanplayEvtGetsFired();
