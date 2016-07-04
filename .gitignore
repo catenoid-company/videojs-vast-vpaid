@@ -7,4 +7,4 @@ coverage/
 *.swp
 *.swo
 .publish/
-bin/
+bin
