@@ -27,9 +27,11 @@ module.exports = function VASTPlugin(options) {
 			return {
 				play: function() {
 					is_ad_playing = true;
+					player.disableProgress.disable();
 				},
 				stop: function() {
 					is_ad_playing = false;
+					player.disableProgress.enable();
 				},
 				isPlaying: function() {
 					return is_ad_playing;
