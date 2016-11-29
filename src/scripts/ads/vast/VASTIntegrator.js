@@ -231,11 +231,11 @@ VASTIntegrator.prototype._addSkipButton = function addSkipButton(source, tracker
   function updateSkipButtonState(skipButton, skipOffset, player) {
     var timeLeft = Math.ceil(skipOffset - player.currentTime());
     if (timeLeft > 0) {
-      skipButton.innerHTML = "Skip in " + utilities.toFixedDigits(timeLeft, 2) + "...";
+      skipButton.innerHTML = "<p><span class='time'>" + utilities.toFixedDigits(timeLeft, 2) + "</span>초 후 광고를</p><p>건너 뛸 수 있습니다.</p>";
     } else {
       if (!dom.hasClass(skipButton, 'enabled')) {
         dom.addClass(skipButton, 'enabled');
-        skipButton.innerHTML = "Skip ad";
+        skipButton.innerHTML = "SKIP";
       }
     }
   }
