@@ -60,9 +60,9 @@ module.exports = {
     remoteUrl: process.env.GH_TOKEN ? 'https://'+process.env.GH_TOKEN+'@github.com/MailOnline/videojs-vast-vpaid' : 'origin'
   },
 
-  //DIST: path.normalize('__dirname/../bin'),
+  DIST: path.normalize('__dirname/../bin'),
   //DEV: path.normalize('__dirname/../dev'),
-  DIST: path.normalize('__dirname/../../SBSPlayer/src/js/support'),
+  //DIST: path.normalize('__dirname/../../SBSPlayer/src/js/support'),
   DEV: path.normalize('__dirname/../dev'),
 
   vendor: [
